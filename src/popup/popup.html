@@ -12,6 +12,8 @@
       <button id="openReader">PDF reader</button>
     </div>
 
+    <p id="status" class="status hidden"></p>
+
     <label class="field">
       <span>Target language</span>
       <select id="targetLang"></select>
@@ -48,7 +50,7 @@
     <label class="check"><input id="pdfTakeover" type="checkbox" /> Open online PDFs in the reader</label>
 
     <label class="field">
-      <span>Pages translated ahead <b id="prefetchValue"></b></span>
+      <span>Pages translated ahead <b id="prefetchPagesValue"></b></span>
       <input id="prefetchPages" type="range" min="0" max="5" step="1" />
     </label>
 
