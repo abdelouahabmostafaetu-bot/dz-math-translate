@@ -128,8 +128,13 @@ body.no-pane #pane { display: none; }
 
 .card .tr {
   font-size: calc(15px * var(--font-scale, 1));
-  line-height: 1.75;
+  line-height: 1.85;
   white-space: pre-wrap;
+  text-align: start;
+  /* Formulas arrive wrapped in Unicode isolates; honour them so mathematics
+     keeps its own direction inside a right-to-left sentence. */
+  unicode-bidi: isolate;
+  font-variant-numeric: tabular-nums;
 }
 
 .card .orig {
@@ -140,6 +145,7 @@ body.no-pane #pane { display: none; }
   font-size: 12.5px;
   direction: ltr;
   text-align: start;
+  unicode-bidi: isolate;
 }
 
 body:not(.show-original) .card .orig { display: none; }
