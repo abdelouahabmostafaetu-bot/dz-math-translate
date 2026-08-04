@@ -5,71 +5,184 @@
 //  so no extension can translate it. We therefore render the PDF ourselves with
 //  PDF.js, group the text layer back into paragraphs, and translate the pages
 //  the reader is actually looking at (plus a couple ahead).
+//
+//  PDF.js is imported lazily on purpose. A static top-level import of a file
+//  that is missing kills the whole module, and every button in the toolbar dies
+//  silently with it.
 // ---------------------------------------------------------------------------
 
-import * as pdfjsLib from "../../vendor/pdfjs/build/pdf.mjs";
-import { EventBus, PDFViewer, PDFLinkService } from "../../vendor/pdfjs/web/pdf_viewer.mjs";
 import { joinLines, normalise, isTranslatable } from "../lib/segment.js";
-import { LANGUAGES, isRtl } from "../lib/settings.js";
-
-pdfjsLib.GlobalWorkerOptions.workerSrc = chrome.runtime.getURL(
-  "vendor/pdfjs/build/pdf.worker.mjs"
-);
+import { LANGUAGES, isRtl, DEFAULTS } from "../lib/settings.js";
 
 const $ = (id) => document.getElementById(id);
-const send = (message) =>
-  new Promise((resolve) => chrome.runtime.sendMessage(message, resolve));
+
+// sendMessage reports failures through lastError instead of rejecting; read it
+// or the caller silently receives undefined.
+function send(message) {
+  return new Promise((resolve) => {
+    chrome.runtime.sendMessage(message, (response) => {
+      if (chrome.runtime.lastError) {
+        resolve({ ok: false, error: chrome.runtime.lastError.message });
+        return;
+      }
+      resolve(response || { ok: false, error: "no response from background" });
+    });
+  });
+}
 
 const state = {
-  settings: null,
+  settings: { ...DEFAULTS },
   pages: new Map(), // pageNumber -> { paragraphs, status }
   visible: new Set(),
   current: 0,
   inFlight: 0,
 };
 
-// ---------- viewer bootstrap ----------
+let pdfjsLib = null;
+let pdfViewer = null;
+let eventBus = null;
+let linkService = null;
+let viewerReady = null;
 
-const container = $("viewerContainer");
-const eventBus = new EventBus();
-const linkService = new PDFLinkService({ eventBus });
-const pdfViewer = new PDFViewer({
-  container,
-  eventBus,
-  linkService,
-  textLayerMode: 1,
-  removePageBorders: true,
-});
-linkService.setViewer(pdfViewer);
+function setStatus(message, kind) {
+  const el = $("status");
+  if (!el) return;
+  if (message) {
+    el.textContent = message;
+    el.className = `status ${kind || ""}`;
+    return;
+  }
+  if (state.inFlight > 0) {
+    const n = state.inFlight;
+    el.textContent = `Translating ${n} page${n > 1 ? "s" : ""}...`;
+    el.className = "status busy";
+  } else {
+    el.textContent = "";
+    el.className = "status";
+  }
+}
 
-eventBus.on("pagesinit", () => {
-  pdfViewer.currentScaleValue = "page-width";
-  $("pageCount").textContent = `/ ${pdfViewer.pagesCount}`;
-  observePages();
-});
+// ---------- PDF.js bootstrap (lazy) ----------
 
-eventBus.on("pagechanging", ({ pageNumber }) => {
-  $("pageNo").value = pageNumber;
-});
+function showMissingPdfjs(error) {
+  console.error("[dzmt] PDF.js failed to load", error);
+  const zone = document.querySelector("#dropzone .dz-inner");
+  if (zone) {
+    zone.innerHTML = `
+      <h1 style="color:#7b2d3b">PDF.js is not installed</h1>
+      <p>This extension renders PDFs itself, so it needs the PDF.js library.
+         It is not committed to the repository because it is several megabytes
+         of third-party code.</p>
+      <p>Run this once in the extension folder, then reload the extension in
+         <b>chrome://extensions</b>:</p>
+      <pre style="background:#1b1b1f;color:#fcfbf7;padding:10px 12px;border-radius:8px;
+                  text-align:start;overflow:auto">node scripts/fetch-pdfjs.mjs</pre>
+      <p class="hint">It needs Node 18 or newer (check with <code>node --version</code>).
+         Afterwards <code>vendor/pdfjs/build/pdf.mjs</code> must exist.</p>`;
+  }
+  setStatus("PDF.js missing", "error");
+}
 
-eventBus.on("textlayerrendered", ({ pageNumber, source }) => {
-  const layer = source?.textLayer?.div || source?.textLayer?.textLayerDiv;
-  if (!layer) return;
-  const paragraphs = extractParagraphs(layer, pageNumber);
-  state.pages.set(pageNumber, { paragraphs, status: "idle" });
-  layer.addEventListener("click", (event) => onPageClick(event, pageNumber));
-  if (state.visible.has(pageNumber) || nearVisible(pageNumber)) schedule(pageNumber);
-  if (pageNumber === state.current) renderPane(pageNumber);
-});
+async function ensureViewer() {
+  if (viewerReady) return viewerReady;
+
+  viewerReady = (async () => {
+    let lib;
+    let web;
+    try {
+      lib = await import("../../vendor/pdfjs/build/pdf.mjs");
+      web = await import("../../vendor/pdfjs/web/pdf_viewer.mjs");
+    } catch (error) {
+      showMissingPdfjs(error);
+      throw new Error("PDF.js is not installed");
+    }
+
+    pdfjsLib = lib;
+    pdfjsLib.GlobalWorkerOptions.workerSrc = chrome.runtime.getURL(
+      "vendor/pdfjs/build/pdf.worker.mjs"
+    );
+
+    eventBus = new web.EventBus();
+    linkService = new web.PDFLinkService({ eventBus });
+    pdfViewer = new web.PDFViewer({
+      container: $("viewerContainer"),
+      eventBus,
+      linkService,
+      textLayerMode: 1,
+    });
+    linkService.setViewer(pdfViewer);
+    wireViewerEvents();
+  })();
+
+  // A failed attempt must not be cached, or a later retry can never succeed.
+  viewerReady.catch(() => {
+    viewerReady = null;
+  });
+
+  return viewerReady;
+}
+
+function wireViewerEvents() {
+  eventBus.on("pagesinit", () => {
+    pdfViewer.currentScaleValue = "page-width";
+    const count = $("pageCount");
+    if (count) count.textContent = `/ ${pdfViewer.pagesCount}`;
+    observePages();
+  });
+
+  eventBus.on("pagechanging", ({ pageNumber }) => {
+    const box = $("pageNo");
+    if (box) box.value = pageNumber;
+  });
+
+  eventBus.on("textlayerrendered", ({ pageNumber, source }) => {
+    // The property was renamed across PDF.js versions.
+    const layer =
+      source?.textLayer?.div || source?.textLayer?.textLayerDiv || source?.textLayerDiv;
+    if (!layer) return;
+
+    const paragraphs = extractParagraphs(layer, pageNumber);
+    state.pages.set(pageNumber, { paragraphs, status: "idle" });
+    layer.addEventListener("click", (event) => onPageClick(event, pageNumber));
+
+    if (state.visible.has(pageNumber) || nearVisible(pageNumber)) schedule(pageNumber);
+    if (pageNumber === state.current) renderPane(pageNumber);
+  });
+}
 
 async function loadDocument(source, title) {
+  setStatus("Opening...");
+  await ensureViewer();
+
   const doc = await pdfjsLib.getDocument(source).promise;
   state.pages.clear();
+  state.visible.clear();
+  state.current = 1;
+
   pdfViewer.setDocument(doc);
   linkService.setDocument(doc, null);
+
   document.body.classList.add("has-doc");
-  $("docTitle").textContent = title || "document.pdf";
-  document.title = `${title || "PDF"} - DZ Math Translate`;
+  const label = title || "document.pdf";
+  const docTitle = $("docTitle");
+  if (docTitle) docTitle.textContent = label;
+  document.title = `${label} - DZ Math Translate`;
+  setStatus();
+}
+
+async function openFile(file) {
+  if (!file) return;
+  if (file.type && file.type !== "application/pdf" && !/\.pdf$/i.test(file.name)) {
+    setStatus("Not a PDF file", "error");
+    return;
+  }
+  try {
+    const data = new Uint8Array(await file.arrayBuffer());
+    await loadDocument({ data }, file.name);
+  } catch (error) {
+    setStatus(`Could not open: ${String(error?.message || error)}`, "error");
+    console.error(error);
+  }
 }
 
 // ---------- paragraph reconstruction ----------
@@ -188,21 +301,23 @@ function observePages() {
         if (entry.isIntersecting) state.visible.add(pageNumber);
         else state.visible.delete(pageNumber);
       }
+
       const visible = [...state.visible].sort((a, b) => a - b);
       const first = visible[0];
       if (first && first !== state.current) {
         state.current = first;
         renderPane(first);
       }
+
       const ahead = state.settings?.prefetchPages ?? 2;
       for (const page of visible) {
         for (let n = page; n <= page + ahead; n++) schedule(n);
       }
     },
-    { root: container, rootMargin: "200px 0px", threshold: 0.02 }
+    { root: $("viewerContainer"), rootMargin: "200px 0px", threshold: 0.02 }
   );
 
-  for (const view of pdfViewer._pages || []) {
+  for (const view of pdfViewer?._pages || []) {
     if (view?.div) observer.observe(view.div);
   }
 }
@@ -242,42 +357,30 @@ async function schedule(pageNumber) {
   if (pageNumber === state.current) renderPane(pageNumber);
 }
 
-function setStatus(message, kind) {
-  const el = $("status");
-  if (message) {
-    el.textContent = message;
-    el.className = `status ${kind || ""}`;
-    return;
-  }
-  if (state.inFlight > 0) {
-    el.textContent = `Translating ${state.inFlight} page${state.inFlight > 1 ? "s" : ""}...`;
-    el.className = "status busy";
-  } else {
-    el.textContent = "";
-    el.className = "status";
-  }
-}
-
 // ---------- reading pane ----------
 
 function renderPane(pageNumber) {
   const body = $("paneBody");
+  if (!body) return;
+
   const page = state.pages.get(pageNumber);
-  $("paneTitle").textContent = `Page ${pageNumber}`;
+  const title = $("paneTitle");
+  if (title) title.textContent = `Page ${pageNumber}`;
+  const meta = $("paneMeta");
 
   if (!page) {
     body.innerHTML = '<p class="pane-note">Rendering page...</p>';
-    $("paneMeta").textContent = "";
+    if (meta) meta.textContent = "";
     return;
   }
 
   const shown = page.paragraphs.filter((p) => !p.skip);
-  const done = shown.filter((p) => p.translation).length;
-  $("paneMeta").textContent = `${done}/${shown.length}`;
+  if (meta) meta.textContent = `${shown.filter((p) => p.translation).length}/${shown.length}`;
 
   body.innerHTML = "";
   if (!shown.length) {
-    body.innerHTML = '<p class="pane-note">No prose on this page (figures or formulas only).</p>';
+    body.innerHTML =
+      '<p class="pane-note">No prose on this page (figures or formulas only).</p>';
     return;
   }
 
@@ -314,8 +417,9 @@ let highlightEl = null;
 
 function highlight(paragraph) {
   clearHighlight();
-  const view = pdfViewer._pages?.[paragraph.pageNumber - 1];
+  const view = pdfViewer?._pages?.[paragraph.pageNumber - 1];
   if (!view?.div) return;
+
   const box = document.createElement("div");
   box.className = "dzmt-hl";
   box.style.top = `${paragraph.rect.top - 2}px`;
@@ -332,9 +436,9 @@ function clearHighlight() {
 }
 
 function scrollToParagraph(paragraph) {
-  const view = pdfViewer._pages?.[paragraph.pageNumber - 1];
+  const view = pdfViewer?._pages?.[paragraph.pageNumber - 1];
   if (!view?.div) return;
-  container.scrollTo({
+  $("viewerContainer").scrollTo({
     top: view.div.offsetTop + paragraph.rect.top - 80,
     behavior: "smooth",
   });
@@ -344,9 +448,8 @@ function scrollToParagraph(paragraph) {
 // Clicking a paragraph in the PDF selects its card in the pane.
 function onPageClick(event, pageNumber) {
   const page = state.pages.get(pageNumber);
-  if (!page) return;
-  const view = pdfViewer._pages?.[pageNumber - 1];
-  if (!view?.div) return;
+  const view = pdfViewer?._pages?.[pageNumber - 1];
+  if (!page || !view?.div) return;
 
   const rect = view.div.getBoundingClientRect();
   const y = event.clientY - rect.top;
@@ -372,12 +475,16 @@ function onPageClick(event, pageNumber) {
 // ---------- toolbar and input ----------
 
 function applySettings(settings) {
-  state.settings = settings;
-  document.body.classList.toggle("show-original", !!settings.showOriginal);
-  document.body.style.setProperty("--font-scale", settings.fontScale || 1);
-  $("paneBody").dir = isRtl(settings.targetLang) ? "rtl" : "ltr";
-  $("showOriginal").checked = !!settings.showOriginal;
-  $("lang").value = settings.targetLang;
+  state.settings = { ...DEFAULTS, ...(settings || {}) };
+  document.body.classList.toggle("show-original", !!state.settings.showOriginal);
+  document.body.style.setProperty("--font-scale", state.settings.fontScale || 1);
+
+  const body = $("paneBody");
+  if (body) body.dir = isRtl(state.settings.targetLang) ? "rtl" : "ltr";
+  const original = $("showOriginal");
+  if (original) original.checked = !!state.settings.showOriginal;
+  const lang = $("lang");
+  if (lang) lang.value = state.settings.targetLang;
 }
 
 function resetTranslations() {
@@ -392,49 +499,80 @@ function resetTranslations() {
   renderPane(state.current || 1);
 }
 
+// One failing control must never stop the others from being wired.
+function on(id, event, handler) {
+  const el = $(id);
+  if (!el) {
+    console.warn(`[dzmt] viewer: #${id} is missing from viewer.html`);
+    return;
+  }
+  el.addEventListener(event, (e) => {
+    try {
+      const result = handler(e, el);
+      if (result && typeof result.catch === "function") {
+        result.catch((error) => {
+          setStatus(String(error?.message || error), "error");
+          console.error(error);
+        });
+      }
+    } catch (error) {
+      setStatus(String(error?.message || error), "error");
+      console.error(error);
+    }
+  });
+}
+
 function wireToolbar() {
   const select = $("lang");
-  for (const { code, name } of LANGUAGES) {
-    const option = document.createElement("option");
-    option.value = code;
-    option.textContent = name;
-    select.append(option);
+  if (select) {
+    for (const { code, name } of LANGUAGES) {
+      const option = document.createElement("option");
+      option.value = code;
+      option.textContent = name;
+      select.append(option);
+    }
   }
 
-  select.addEventListener("change", async () => {
-    await send({ type: "setSettings", patch: { targetLang: select.value } });
-    const { data } = await send({ type: "getSettings" });
-    applySettings(data);
+  on("lang", "change", async (_e, el) => {
+    await send({ type: "setSettings", patch: { targetLang: el.value } });
+    const res = await send({ type: "getSettings" });
+    applySettings(res.ok ? res.data : { ...state.settings, targetLang: el.value });
     resetTranslations();
   });
 
-  $("showOriginal").addEventListener("change", async (event) => {
-    await send({ type: "setSettings", patch: { showOriginal: event.target.checked } });
-    document.body.classList.toggle("show-original", event.target.checked);
+  on("showOriginal", "change", async (event) => {
+    const checked = event.target.checked;
+    document.body.classList.toggle("show-original", checked);
+    state.settings.showOriginal = checked;
+    await send({ type: "setSettings", patch: { showOriginal: checked } });
   });
 
-  $("togglePane").addEventListener("click", () => {
-    document.body.classList.toggle("no-pane");
-  });
+  on("togglePane", "click", () => document.body.classList.toggle("no-pane"));
 
-  $("prev").addEventListener("click", () => pdfViewer.previousPage());
-  $("next").addEventListener("click", () => pdfViewer.nextPage());
-  $("zoomIn").addEventListener("click", () => (pdfViewer.currentScale *= 1.1));
-  $("zoomOut").addEventListener("click", () => (pdfViewer.currentScale /= 1.1));
-  $("pageNo").addEventListener("change", (event) => {
+  // Navigation is meaningless before a document is loaded; guard rather than throw.
+  on("prev", "click", () => pdfViewer?.previousPage());
+  on("next", "click", () => pdfViewer?.nextPage());
+  on("zoomIn", "click", () => {
+    if (pdfViewer) pdfViewer.currentScale *= 1.1;
+  });
+  on("zoomOut", "click", () => {
+    if (pdfViewer) pdfViewer.currentScale /= 1.1;
+  });
+  on("pageNo", "change", (event) => {
+    if (!pdfViewer) return;
     const n = Number(event.target.value);
     if (n >= 1 && n <= pdfViewer.pagesCount) pdfViewer.currentPageNumber = n;
   });
 
-  $("open").addEventListener("click", () => $("file").click());
-  $("file").addEventListener("change", async (event) => {
+  on("open", "click", () => $("file")?.click());
+  on("file", "change", async (event) => {
     const file = event.target.files?.[0];
-    if (!file) return;
-    const data = new Uint8Array(await file.arrayBuffer());
-    await loadDocument({ data }, file.name);
+    event.target.value = ""; // allow re-opening the same file
+    await openFile(file);
   });
 
-  // drag and drop, which also covers local files without any file permission
+  // Dropping a file needs no permission at all, which is the easiest route for
+  // a PDF sitting in Downloads.
   const stop = (event) => {
     event.preventDefault();
     event.stopPropagation();
@@ -450,17 +588,26 @@ function wireToolbar() {
   document.addEventListener("drop", async (event) => {
     stop(event);
     document.body.classList.remove("dragging");
-    const file = event.dataTransfer?.files?.[0];
-    if (!file) return;
-    const data = new Uint8Array(await file.arrayBuffer());
-    await loadDocument({ data }, file.name);
+    await openFile(event.dataTransfer?.files?.[0]);
+  });
+
+  document.addEventListener("keydown", (event) => {
+    if (event.key === "o" && (event.ctrlKey || event.metaKey)) {
+      event.preventDefault();
+      $("file")?.click();
+    }
   });
 }
 
 (async function main() {
-  const { data } = await send({ type: "getSettings" });
-  applySettings(data);
+  // Wire the UI first. Everything below can fail; the buttons must not.
   wireToolbar();
+
+  const res = await send({ type: "getSettings" });
+  applySettings(res.ok ? res.data : null);
+  if (!res.ok) {
+    setStatus(`Settings unavailable: ${res.error}`, "error");
+  }
 
   const file = new URLSearchParams(location.search).get("file");
   if (!file) return;
@@ -469,7 +616,7 @@ function wireToolbar() {
     const url = decodeURIComponent(file);
     await loadDocument({ url }, url.split("/").pop());
   } catch (error) {
-    setStatus("Could not open this PDF", "error");
+    setStatus(`Could not open this PDF: ${String(error?.message || error)}`, "error");
     console.error(error);
   }
 })();
