@@ -11,27 +11,49 @@
     <header id="toolbar">
       <div class="group">
         <button id="open" title="Open a local PDF (Ctrl+O)">Open PDF</button>
+        <button id="toggleOutline" title="Table of contents">&#9776;</button>
         <span id="docTitle" class="title">No document</span>
       </div>
 
       <div class="group">
-        <button id="prev" title="Previous page">&#8249;</button>
+        <button id="prev" title="Previous page (k)">&#8249;</button>
         <input id="pageNo" type="number" min="1" value="1" />
         <span id="pageCount">/ 0</span>
-        <button id="next" title="Next page">&#8250;</button>
+        <button id="next" title="Next page (j)">&#8250;</button>
         <button id="zoomOut" title="Zoom out">-</button>
         <button id="zoomIn" title="Zoom in">+</button>
+        <button id="toggleFind" title="Search in the document (Ctrl+F)">&#9906;</button>
       </div>
 
       <div class="group">
         <select id="lang" title="Target language"></select>
+        <button id="translatePage" title="Translate the current page now">Translate page</button>
+        <button id="speakPage" title="Read this page aloud (s)">&#9835;</button>
+        <button id="exportBtn" title="Export the bilingual text as Markdown">&#8681;</button>
+        <button id="themeBtn" title="Light, sepia or dark">&#9680;</button>
         <label class="check"><input id="showOriginal" type="checkbox" /> Original</label>
-        <button id="togglePane" title="Show or hide the translation pane">Pane</button>
+        <button id="togglePane" title="Show or hide the translation pane (t)">Pane</button>
+        <button id="optionsBtn" title="Settings and glossary">&#9881;</button>
         <span id="status" class="status"></span>
       </div>
     </header>
 
+    <div id="findbar" hidden>
+      <input id="findInput" type="search" placeholder="Search the document" />
+      <button id="findPrev" title="Previous match">&#8249;</button>
+      <button id="findNext" title="Next match">&#8250;</button>
+      <label class="check"><input id="findHighlightAll" type="checkbox" checked /> Highlight all</label>
+      <label class="check"><input id="findCase" type="checkbox" /> Match case</label>
+      <span id="findCount" class="count"></span>
+      <button id="findClose" title="Close">&#10005;</button>
+    </div>
+
     <main id="main">
+      <aside id="outline" hidden>
+        <div class="aside-head">Contents</div>
+        <div id="outlineBody"></div>
+      </aside>
+
       <!-- #stage is the positioned ancestor. PDF.js requires #viewerContainer
            itself to be absolutely positioned, and it must own its own subtree,
            so the dropzone is a sibling rather than a child. -->
@@ -48,6 +70,7 @@
               Each page is translated paragraph by paragraph as you scroll.
               Formulas are never sent to the translator.
             </p>
+            <div id="recent"></div>
           </div>
         </div>
       </div>

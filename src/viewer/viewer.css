@@ -8,6 +8,29 @@
   --accent-soft: #e8eff6;
   --pane-width: 400px;
   --toolbar-height: 46px;
+  --line-height: 1.75;
+}
+
+/* Sepia and dark are reading comfort, not decoration: hours with a textbook
+   are easier on a warm or dark background. */
+body[data-theme="sepia"] {
+  --bg: #efe7d7;
+  --panel: #f8f2e6;
+  --ink: #2b2620;
+  --soft: #6b6153;
+  --rule: #d9cdb6;
+  --accent: #7a5326;
+  --accent-soft: #f1e5cf;
+}
+
+body[data-theme="dark"] {
+  --bg: #17181b;
+  --panel: #1f2126;
+  --ink: #e9e7e2;
+  --soft: #a2a6b0;
+  --rule: #34373d;
+  --accent: #7fb3e0;
+  --accent-soft: #23303c;
 }
 
 * { box-sizing: border-box; }
@@ -39,32 +62,53 @@ html, body {
 
 #toolbar button,
 #toolbar select,
-#toolbar input[type="number"] {
+#toolbar input[type="number"],
+#findbar button,
+#findbar input {
   font: inherit;
   color: var(--ink);
-  background: #fff;
+  background: var(--panel);
   border: 1px solid var(--rule);
   border-radius: 6px;
   padding: 4px 9px;
   cursor: pointer;
 }
 
-#toolbar button:hover { background: var(--accent-soft); border-color: var(--accent); }
+#toolbar button:hover,
+#findbar button:hover { background: var(--accent-soft); border-color: var(--accent); }
+#toolbar button.on { background: var(--accent-soft); border-color: var(--accent); }
 #toolbar input[type="number"] { width: 58px; text-align: center; cursor: text; }
-#toolbar .check { display: flex; align-items: center; gap: 4px; color: var(--soft); cursor: pointer; }
+#toolbar .check,
+#findbar .check { display: flex; align-items: center; gap: 4px; color: var(--soft); cursor: pointer; }
 #pageCount { color: var(--soft); }
 
 .title {
-  max-width: 34vw;
+  max-width: 22vw;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
   color: var(--soft);
 }
 
-.status { min-width: 130px; color: var(--soft); font-variant-numeric: tabular-nums; }
+.status { min-width: 120px; color: var(--soft); font-variant-numeric: tabular-nums; }
 .status.busy { color: var(--accent); }
 .status.error { color: #a3242f; }
+
+/* ---------- find bar ---------- */
+
+#findbar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 12px;
+  background: var(--panel);
+  border-bottom: 1px solid var(--rule);
+  position: relative;
+  z-index: 4;
+}
+#findbar[hidden] { display: none; }
+#findInput { width: 280px; cursor: text; }
+#findCount { color: var(--soft); font-size: 12.5px; min-width: 90px; }
 
 /* ---------- layout ---------- */
 
@@ -73,6 +117,35 @@ html, body {
   height: calc(100% - var(--toolbar-height));
   overflow: hidden;
 }
+body.find-open #main { height: calc(100% - var(--toolbar-height) - 43px); }
+
+#outline {
+  width: 260px;
+  flex: 0 0 260px;
+  background: var(--panel);
+  border-inline-end: 1px solid var(--rule);
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+#outline[hidden] { display: none; }
+.aside-head {
+  padding: 10px 14px;
+  border-bottom: 1px solid var(--rule);
+  font-weight: 600;
+}
+#outlineBody { overflow: auto; padding: 8px 6px 30px; }
+#outlineBody a {
+  display: block;
+  padding: 4px 8px;
+  border-radius: 6px;
+  color: var(--ink);
+  text-decoration: none;
+  font-size: 13px;
+}
+#outlineBody a:hover { background: var(--accent-soft); }
+#outlineBody .depth1 { padding-inline-start: 22px; color: var(--soft); }
+#outlineBody .depth2 { padding-inline-start: 36px; color: var(--soft); font-size: 12.5px; }
 
 /* The positioned ancestor. PDF.js insists that the scrolling container itself
    be absolutely positioned, so the flex sizing happens on this wrapper. */
@@ -81,6 +154,7 @@ html, body {
   flex: 1 1 auto;
   min-width: 0;
   overflow: hidden;
+  order: 2;
 }
 
 #viewerContainer {
@@ -98,6 +172,14 @@ html, body {
   display: flex;
   flex-direction: column;
   overflow: hidden;
+  order: 3;
+}
+
+/* Reading pane on the leading side instead of the trailing one. */
+body.pane-start #pane {
+  order: 1;
+  border-inline-start: 0;
+  border-inline-end: 1px solid var(--rule);
 }
 
 body.no-pane #pane { display: none; }
@@ -117,6 +199,7 @@ body.no-pane #pane { display: none; }
 /* ---------- translation cards ---------- */
 
 .card {
+  position: relative;
   border: 1px solid transparent;
   border-radius: 8px;
   padding: 8px 10px;
@@ -124,11 +207,11 @@ body.no-pane #pane { display: none; }
   cursor: pointer;
   transition: background 0.12s, border-color 0.12s;
 }
-.card:hover, .card.active { background: var(--accent-soft); border-color: #bcd3e6; }
+.card:hover, .card.active { background: var(--accent-soft); border-color: var(--accent); }
 
 .card .tr {
   font-size: calc(15px * var(--font-scale, 1));
-  line-height: 1.85;
+  line-height: var(--line-height, 1.75);
   white-space: pre-wrap;
   text-align: start;
   /* Formulas arrive wrapped in Unicode isolates; honour them so mathematics
@@ -152,6 +235,25 @@ body:not(.show-original) .card .orig { display: none; }
 
 .card.pending .tr { color: var(--soft); font-style: italic; }
 .card.failed .tr { color: #a3242f; }
+
+.card .tools {
+  display: none;
+  gap: 4px;
+  position: absolute;
+  top: 4px;
+  inset-inline-end: 4px;
+}
+.card:hover .tools { display: flex; }
+.card .tools button {
+  font: 12px/1 system-ui, sans-serif;
+  color: var(--soft);
+  background: var(--panel);
+  border: 1px solid var(--rule);
+  border-radius: 5px;
+  padding: 3px 6px;
+  cursor: pointer;
+}
+.card .tools button:hover { color: var(--accent); border-color: var(--accent); }
 
 .pane-note { color: var(--soft); padding: 18px 4px; }
 
@@ -191,11 +293,35 @@ body.dragging #dropzone {
 .dz-inner .hint { font-size: 12.5px; }
 .dz-inner pre { font-size: 12.5px; }
 .dz-inner code {
-  background: #e6e4dd;
+  background: var(--accent-soft);
   padding: 1px 4px;
   border-radius: 4px;
   font-size: 12px;
 }
 
+#recent { margin-top: 18px; text-align: start; }
+#recent h2 {
+  font-size: 11.5px;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  color: var(--soft);
+  margin: 0 0 6px;
+}
+#recent a {
+  display: block;
+  padding: 4px 8px;
+  border-radius: 6px;
+  color: var(--ink);
+  text-decoration: none;
+  font-size: 13px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+#recent a:hover { background: var(--accent-soft); }
+
 /* pdf.js pages */
 .pdfViewer .page { margin: 0 auto 16px; box-shadow: 0 1px 6px rgba(0, 0, 0, 0.16); }
+
+/* Dark reading of a white page is unpleasant; soften the paper slightly. */
+body[data-theme="dark"] .pdfViewer .page canvas { filter: invert(0.9) hue-rotate(180deg); }
