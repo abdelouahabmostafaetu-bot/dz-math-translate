@@ -1,0 +1,202 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>DZ Math Translate - Settings</title>
+    <link rel="stylesheet" href="options.css" />
+  </head>
+  <body>
+    <header>
+      <h1>DZ Math Translate</h1>
+      <span id="saved" class="saved"></span>
+    </header>
+
+    <main>
+      <section>
+        <h2>Engine</h2>
+        <div class="row">
+          <label for="provider">Translator</label>
+          <select id="provider"></select>
+        </div>
+        <p class="note">
+          DeepL and Google Cloud can be told which text not to touch, so whole
+          sentences are translated at once and the grammar is better. The free
+          Google endpoint has no such feature, so paragraphs are cut around each
+          formula instead. For a mathematics book, a free DeepL key is worth it.
+        </p>
+
+        <div class="row">
+          <label for="googleApiKey">Google Cloud key</label>
+          <input id="googleApiKey" type="password" autocomplete="off" placeholder="AIza..." />
+        </div>
+        <div class="row">
+          <label for="deeplApiKey">DeepL key</label>
+          <input id="deeplApiKey" type="password" autocomplete="off" placeholder="xxxxxxxx:fx" />
+        </div>
+        <div class="row">
+          <label for="deeplFree">DeepL free plan</label>
+          <input id="deeplFree" type="checkbox" />
+        </div>
+        <div class="row">
+          <label for="libreEndpoint">LibreTranslate URL</label>
+          <input id="libreEndpoint" type="text" spellcheck="false" />
+        </div>
+        <div class="row">
+          <label for="libreApiKey">LibreTranslate key</label>
+          <input id="libreApiKey" type="password" autocomplete="off" />
+        </div>
+
+        <div class="row">
+          <label for="sourceLang">From</label>
+          <select id="sourceLang"></select>
+        </div>
+        <div class="row">
+          <label for="targetLang">To</label>
+          <select id="targetLang"></select>
+        </div>
+      </section>
+
+      <section>
+        <h2>Mathematics</h2>
+        <div class="row">
+          <label for="protectMath">Never translate formulas</label>
+          <input id="protectMath" type="checkbox" />
+        </div>
+        <div class="row">
+          <label for="dehyphenate">Repair words split across lines</label>
+          <input id="dehyphenate" type="checkbox" />
+        </div>
+        <div class="row">
+          <label for="skipHeaders">Skip running heads and page numbers</label>
+          <input id="skipHeaders" type="checkbox" />
+        </div>
+        <div class="row">
+          <label for="minChars">Shortest paragraph to translate</label>
+          <input id="minChars" type="number" min="1" max="40" />
+        </div>
+      </section>
+
+      <section>
+        <h2>Terminology</h2>
+        <div class="row">
+          <label for="glossaryEnabled">Use my glossary</label>
+          <input id="glossaryEnabled" type="checkbox" />
+        </div>
+        <p class="note">
+          One term per line: <code>english = translation</code>. Lines starting
+          with <code>#</code> are ignored. A term listed here is never sent to
+          the translator, so it always comes out exactly as you wrote it.
+        </p>
+        <textarea id="glossaryText" spellcheck="false" rows="14"
+          placeholder="vector space = &#1601;&#1590;&#1575;&#1569; &#1588;&#1593;&#1575;&#1593;&#1610;"></textarea>
+        <div class="buttons">
+          <button id="loadMath" type="button">Load Arabic maths glossary</button>
+          <button id="exportGlossary" type="button">Export</button>
+          <button id="importGlossary" type="button">Import</button>
+          <button id="clearGlossary" type="button" class="danger">Clear</button>
+          <span id="glossaryCount" class="count"></span>
+        </div>
+        <input id="glossaryFile" type="file" accept=".txt,.csv,.tsv,text/plain" hidden />
+      </section>
+
+      <section>
+        <h2>Reading</h2>
+        <div class="row">
+          <label for="theme">Theme</label>
+          <select id="theme">
+            <option value="light">Light</option>
+            <option value="sepia">Sepia</option>
+            <option value="dark">Dark</option>
+          </select>
+        </div>
+        <div class="row">
+          <label for="paneSide">Translation pane</label>
+          <select id="paneSide">
+            <option value="end">Right (left in Arabic)</option>
+            <option value="start">Left (right in Arabic)</option>
+          </select>
+        </div>
+        <div class="row">
+          <label for="paneWidth">Pane width</label>
+          <input id="paneWidth" type="range" min="280" max="720" step="20" />
+          <output id="paneWidthOut"></output>
+        </div>
+        <div class="row">
+          <label for="fontScale">Text size</label>
+          <input id="fontScale" type="range" min="0.8" max="2" step="0.05" />
+          <output id="fontScaleOut"></output>
+        </div>
+        <div class="row">
+          <label for="lineHeight">Line spacing</label>
+          <input id="lineHeight" type="range" min="1.3" max="2.4" step="0.05" />
+          <output id="lineHeightOut"></output>
+        </div>
+        <div class="row">
+          <label for="showOriginal">Show the English under each translation</label>
+          <input id="showOriginal" type="checkbox" />
+        </div>
+        <div class="row">
+          <label for="pdfTakeover">Open online PDFs in this reader</label>
+          <input id="pdfTakeover" type="checkbox" />
+        </div>
+        <div class="row">
+          <label for="webInline">Translate web pages under each block</label>
+          <input id="webInline" type="checkbox" />
+        </div>
+      </section>
+
+      <section>
+        <h2>Read aloud</h2>
+        <div class="row">
+          <label for="ttsVoice">Voice</label>
+          <select id="ttsVoice"></select>
+        </div>
+        <div class="row">
+          <label for="ttsRate">Speed</label>
+          <input id="ttsRate" type="range" min="0.5" max="2" step="0.05" />
+          <output id="ttsRateOut"></output>
+        </div>
+        <div class="row">
+          <label for="ttsPitch">Pitch</label>
+          <input id="ttsPitch" type="range" min="0.5" max="1.5" step="0.05" />
+          <output id="ttsPitchOut"></output>
+        </div>
+        <div class="buttons">
+          <button id="ttsTest" type="button">Test</button>
+          <button id="ttsStop" type="button">Stop</button>
+          <span id="ttsNote" class="count"></span>
+        </div>
+      </section>
+
+      <section>
+        <h2>Performance</h2>
+        <div class="row">
+          <label for="autoTranslate">Translate automatically while scrolling</label>
+          <input id="autoTranslate" type="checkbox" />
+        </div>
+        <div class="row">
+          <label for="concurrency">Parallel requests</label>
+          <input id="concurrency" type="range" min="1" max="8" step="1" />
+          <output id="concurrencyOut"></output>
+        </div>
+        <div class="row">
+          <label for="prefetchPages">Pages translated ahead</label>
+          <input id="prefetchPages" type="range" min="0" max="6" step="1" />
+          <output id="prefetchPagesOut"></output>
+        </div>
+        <p class="note">
+          Raising these makes reading feel faster but hits the free endpoint
+          harder, which is what triggers rate limiting. Four is a sane maximum.
+        </p>
+        <div class="buttons">
+          <span id="cacheInfo" class="count"></span>
+          <button id="clearCache" type="button">Clear translation cache</button>
+          <button id="shortcuts" type="button">Keyboard shortcuts</button>
+          <button id="reset" type="button" class="danger">Reset everything</button>
+        </div>
+      </section>
+    </main>
+
+    <script type="module" src="options.js"></script>
+  </body>
+</html>
