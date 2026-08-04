@@ -1,7 +1,7 @@
 // Central settings store. Everything else reads defaults from here.
 
 export const DEFAULTS = {
-  // translation
+  // ---- translation engine ----
   provider: "google-free", // google-free | google-cloud | deepl | libre
   sourceLang: "auto",
   targetLang: "ar",
@@ -11,18 +11,33 @@ export const DEFAULTS = {
   libreEndpoint: "https://libretranslate.com/translate",
   libreApiKey: "",
 
-  // behaviour
+  // ---- behaviour ----
   protectMath: true, // never send formulas to the translator
   dehyphenate: true, // repair words broken across PDF lines
+  skipHeaders: true, // ignore running heads, page numbers, short noise
+  minChars: 3, // shortest paragraph worth translating
   concurrency: 4, // parallel requests
   prefetchPages: 2, // pages translated ahead of the visible one
+  autoTranslate: true, // translate on scroll; off = translate on demand only
 
-  // presentation
+  // ---- terminology ----
+  glossaryEnabled: true,
+  glossary: [], // [{ from: "vector space", to: "فضاء شعاعي" }]
+
+  // ---- presentation ----
   pdfTakeover: true, // open online PDFs in the bilingual reader
   paneSide: "end", // reading pane side: start | end
+  paneWidth: 400, // pixels
   fontScale: 1.0,
+  lineHeight: 1.75,
+  theme: "light", // light | sepia | dark
   showOriginal: false,
   webInline: true, // insert translations under each block on web pages
+
+  // ---- read aloud ----
+  ttsVoice: "",
+  ttsRate: 1.0,
+  ttsPitch: 1.0,
 };
 
 const RTL = new Set(["ar", "he", "fa", "ur", "ps", "sd", "ug", "yi", "dv"]);
@@ -63,3 +78,10 @@ export const LANGUAGES = [
   { code: "tr", name: "Turkish" },
   { code: "zh-CN", name: "Chinese" },
 ];
+
+export const PROVIDER_LABELS = {
+  "google-free": "Google Translate (free, no key)",
+  "google-cloud": "Google Cloud Translation (API key)",
+  deepl: "DeepL (API key, best quality)",
+  libre: "LibreTranslate (self hosted)",
+};
