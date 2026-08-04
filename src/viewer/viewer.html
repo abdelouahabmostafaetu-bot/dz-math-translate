@@ -10,7 +10,7 @@
   <body>
     <header id="toolbar">
       <div class="group">
-        <button id="open" title="Open a local PDF">Open PDF</button>
+        <button id="open" title="Open a local PDF (Ctrl+O)">Open PDF</button>
         <span id="docTitle" class="title">No document</span>
       </div>
 
@@ -32,8 +32,14 @@
     </header>
 
     <main id="main">
-      <div id="viewerContainer">
-        <div id="viewer" class="pdfViewer"></div>
+      <!-- #stage is the positioned ancestor. PDF.js requires #viewerContainer
+           itself to be absolutely positioned, and it must own its own subtree,
+           so the dropzone is a sibling rather than a child. -->
+      <div id="stage">
+        <div id="viewerContainer">
+          <div id="viewer" class="pdfViewer"></div>
+        </div>
+
         <div id="dropzone">
           <div class="dz-inner">
             <h1>Bilingual reader</h1>

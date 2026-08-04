@@ -7,6 +7,7 @@
   --accent: #1f4e79;
   --accent-soft: #e8eff6;
   --pane-width: 400px;
+  --toolbar-height: 46px;
 }
 
 * { box-sizing: border-box; }
@@ -26,7 +27,7 @@ html, body {
   align-items: center;
   justify-content: space-between;
   gap: 12px;
-  height: 46px;
+  height: var(--toolbar-height);
   padding: 0 12px;
   background: var(--panel);
   border-bottom: 1px solid var(--rule);
@@ -69,13 +70,22 @@ html, body {
 
 #main {
   display: flex;
-  height: calc(100% - 46px);
+  height: calc(100% - var(--toolbar-height));
+  overflow: hidden;
+}
+
+/* The positioned ancestor. PDF.js insists that the scrolling container itself
+   be absolutely positioned, so the flex sizing happens on this wrapper. */
+#stage {
+  position: relative;
+  flex: 1 1 auto;
+  min-width: 0;
   overflow: hidden;
 }
 
 #viewerContainer {
-  position: relative;
-  flex: 1;
+  position: absolute;
+  inset: 0;
   overflow: auto;
   padding: 16px 0;
 }
@@ -155,17 +165,31 @@ body:not(.show-original) .card .orig { display: none; }
 #dropzone {
   position: absolute;
   inset: 0;
+  z-index: 2;
   display: grid;
   place-items: center;
+  padding: 20px;
   background: var(--bg);
+  overflow: auto;
 }
 body.has-doc #dropzone { display: none; }
-body.dragging #dropzone { outline: 3px dashed var(--accent); outline-offset: -14px; }
+body.dragging #dropzone {
+  display: grid;
+  outline: 3px dashed var(--accent);
+  outline-offset: -14px;
+}
 
-.dz-inner { text-align: center; max-width: 420px; }
+.dz-inner { text-align: center; max-width: 460px; }
 .dz-inner h1 { font-size: 22px; margin: 0 0 8px; }
 .dz-inner p { color: var(--soft); margin: 6px 0; }
 .dz-inner .hint { font-size: 12.5px; }
+.dz-inner pre { font-size: 12.5px; }
+.dz-inner code {
+  background: #e6e4dd;
+  padding: 1px 4px;
+  border-radius: 4px;
+  font-size: 12px;
+}
 
 /* pdf.js pages */
 .pdfViewer .page { margin: 0 auto 16px; box-shadow: 0 1px 6px rgba(0, 0, 0, 0.16); }
