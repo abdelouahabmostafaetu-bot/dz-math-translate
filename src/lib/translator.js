@@ -1,13 +1,25 @@
 // ---------------------------------------------------------------------------
-//  Translation engine: providers + concurrency limit + retry + cache.
-//  Runs in the service worker only, so every page shares one cache and one
-//  rate limit.
+//  Translation engine: providers, concurrency, retry, cache.
+//
+//  Runs in the service worker only, so the whole browser shares one cache and
+//  one rate limit.
+//
+//  Formulas are protected in one of two ways, never with placeholders:
+//
+//   * runs  - split the paragraph, send only the prose, reassemble. Used for
+//             the free Google endpoint, which has no markup support.
+//   * tags  - send the paragraph as markup with formulas inside tags the API
+//             is documented to ignore (DeepL tag_handling=xml + ignore_tags,
+//             Google format=html with translate="no"). Better grammar, since
+//             the engine still sees the whole sentence.
 // ---------------------------------------------------------------------------
 
-import { getSettings } from "./settings.js";
-import { protectMath, restoreMath, normalise } from "./segment.js";
+import { getSettings, isRtl } from "./settings.js";
+import { normalise, splitRuns, isolate } from "./segment.js";
 
 class RateLimited extends Error {}
+
+const TAG_PROVIDERS = new Set(["google-cloud", "deepl"]);
 
 // ---------- cache -----------------------------------------------------------
 
@@ -38,19 +50,18 @@ function cacheSet(key, value) {
   if (memory.size > MEMORY_MAX) memory.clear();
   memory.set(key, value);
   pendingWrites[key] = value;
-  if (!flushTimer) {
-    flushTimer = setTimeout(async () => {
-      const batch = { ...pendingWrites };
-      for (const k of Object.keys(pendingWrites)) delete pendingWrites[k];
-      flushTimer = null;
-      try {
-        await chrome.storage.local.set(batch);
-      } catch (error) {
-        // Quota exceeded: drop the persistent cache, keep working in memory.
-        await clearCache();
-      }
-    }, 1500);
-  }
+  if (flushTimer) return;
+
+  flushTimer = setTimeout(async () => {
+    const batch = { ...pendingWrites };
+    for (const k of Object.keys(pendingWrites)) delete pendingWrites[k];
+    flushTimer = null;
+    try {
+      await chrome.storage.local.set(batch);
+    } catch {
+      await clearCache(); // quota exceeded: keep working from memory
+    }
+  }, 1500);
 }
 
 export async function cacheStats() {
@@ -109,8 +120,8 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 const GOOGLE_FREE_URL = "https://translate.googleapis.com/translate_a/single";
 const GOOGLE_CLOUD_URL = "https://translation.googleapis.com/language/translate/v2";
 
-// Unofficial endpoint used by the Google Translate web page. No key, no cost,
-// but rate limited and not covered by any API contract: see README.
+// Unofficial endpoint used by the Google Translate web page: no key, no cost,
+// rate limited, no contract. See the README.
 async function googleFree({ text, sl, tl }) {
   const url = new URL(GOOGLE_FREE_URL);
   url.searchParams.set("client", "gtx");
@@ -121,22 +132,21 @@ async function googleFree({ text, sl, tl }) {
   url.searchParams.set("q", text);
 
   const res = await fetch(url, { credentials: "omit", cache: "no-store" });
-  if (res.status === 429 || res.status === 403) throw new RateLimited("429");
+  if (res.status === 429 || res.status === 403) throw new RateLimited("rate limited");
   if (!res.ok) throw new Error(`google-free ${res.status}`);
 
   const data = await res.json();
-  const sentences = data && data.sentences ? data.sentences : [];
-  return sentences.map((s) => s.trans || "").join("");
+  return (data?.sentences || []).map((s) => s.trans || "").join("");
 }
 
-async function googleCloud({ text, sl, tl, settings }) {
+async function googleCloud({ text, sl, tl, settings, tagged }) {
   const key = settings.googleApiKey;
   if (!key) throw new Error("Google Cloud API key missing");
 
   const url = new URL(GOOGLE_CLOUD_URL);
   url.searchParams.set("key", key);
 
-  const body = { q: text, target: tl, format: "text" };
+  const body = { q: text, target: tl, format: tagged ? "html" : "text" };
   if (sl && sl !== "auto") body.source = sl;
 
   const res = await fetch(url, {
@@ -144,14 +154,14 @@ async function googleCloud({ text, sl, tl, settings }) {
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(body),
   });
-  if (res.status === 429) throw new RateLimited("429");
+  if (res.status === 429) throw new RateLimited("rate limited");
   if (!res.ok) throw new Error(`google-cloud ${res.status}`);
 
   const data = await res.json();
   return data?.data?.translations?.[0]?.translatedText || "";
 }
 
-async function deepl({ text, sl, tl, settings }) {
+async function deepl({ text, sl, tl, settings, tagged }) {
   const key = settings.deeplApiKey;
   if (!key) throw new Error("DeepL API key missing");
 
@@ -160,6 +170,11 @@ async function deepl({ text, sl, tl, settings }) {
 
   const params = new URLSearchParams({ text, target_lang: tl.toUpperCase() });
   if (sl && sl !== "auto") params.set("source_lang", sl.toUpperCase());
+  if (tagged) {
+    // Documented DeepL feature: content inside ignored tags is passed through.
+    params.set("tag_handling", "xml");
+    params.set("ignore_tags", "x");
+  }
 
   const res = await fetch(endpoint, {
     method: "POST",
@@ -169,7 +184,7 @@ async function deepl({ text, sl, tl, settings }) {
     },
     body: params,
   });
-  if (res.status === 429 || res.status === 456) throw new RateLimited("429");
+  if (res.status === 429 || res.status === 456) throw new RateLimited("rate limited");
   if (!res.ok) throw new Error(`deepl ${res.status}`);
 
   const data = await res.json();
@@ -188,7 +203,7 @@ async function libre({ text, sl, tl, settings }) {
       api_key: settings.libreApiKey || undefined,
     }),
   });
-  if (res.status === 429) throw new RateLimited("429");
+  if (res.status === 429) throw new RateLimited("rate limited");
   if (!res.ok) throw new Error(`libre ${res.status}`);
 
   const data = await res.json();
@@ -202,33 +217,21 @@ const PROVIDERS = {
   libre,
 };
 
-// ---------- public API ------------------------------------------------------
-
-async function translateOne(rawText, settings) {
-  const source = normalise(rawText);
-  const tl = settings.targetLang;
+// One network call, rate limited, retried, with a browser-wide cooldown.
+async function call(text, settings, tagged = false) {
+  const fn = PROVIDERS[settings.provider] || googleFree;
   const sl = settings.sourceLang;
-  const key = cacheKey(settings.provider, sl, tl, source);
-
-  const hit = await cacheGet(key);
-  if (hit !== undefined) return hit;
-
-  const { text, parts } = protectMath(source, settings.protectMath);
-  const call = PROVIDERS[settings.provider] || googleFree;
+  const tl = settings.targetLang;
 
   let lastError;
   for (let attempt = 0; attempt < 4; attempt++) {
     const wait = cooldownUntil - Date.now();
     if (wait > 0) await sleep(wait);
     try {
-      const raw = await limiter.run(() => call({ text, sl, tl, settings }));
-      const out = restoreMath(raw, parts);
-      cacheSet(key, out);
-      return out;
+      return await limiter.run(() => fn({ text, sl, tl, settings, tagged }));
     } catch (error) {
       lastError = error;
       if (error instanceof RateLimited) {
-        // Back off globally, not just for this request.
         const backoff = 1500 * Math.pow(2, attempt);
         cooldownUntil = Date.now() + backoff;
         await sleep(backoff);
@@ -244,10 +247,102 @@ async function translateOne(rawText, settings) {
   throw lastError || new Error("translation failed");
 }
 
+// ---------- markup helpers --------------------------------------------------
+
+const escapeXml = (s) =>
+  String(s).replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+
+function unescapeXml(s) {
+  return String(s)
+    .replace(/&lt;/g, "<")
+    .replace(/&gt;/g, ">")
+    .replace(/&quot;/g, '"')
+    .replace(/&#39;/g, "'")
+    .replace(/&nbsp;/g, " ")
+    .replace(/&amp;/g, "&");
+}
+
+function buildMarkup(runs, useX) {
+  return runs
+    .map(({ type, value, ws }) => {
+      const body = escapeXml(value);
+      if (type !== "math") return ws + body;
+      return ws + (useX ? `<x>${body}</x>` : `<span translate="no">${body}</span>`);
+    })
+    .join("");
+}
+
+function parseMarkup(raw, rtl) {
+  let out = String(raw || "");
+  out = out.replace(/<x>([\s\S]*?)<\/x>/g, (_m, inner) => isolate(unescapeXml(inner), rtl));
+  out = out.replace(
+    /<span[^>]*translate="?no"?[^>]*>([\s\S]*?)<\/span>/gi,
+    (_m, inner) => isolate(unescapeXml(inner), rtl)
+  );
+  out = out.replace(/<[^>]+>/g, ""); // any tag the engine invented
+  return unescapeXml(out).replace(/\s+/g, " ").trim();
+}
+
+// ---------- strategies ------------------------------------------------------
+
+// Send prose only; mathematics never leaves the browser.
+async function translateByRuns(runs, settings, rtl) {
+  const pieces = await Promise.all(
+    runs.map(async (run) => {
+      if (run.type === "math") return isolate(run.value, rtl);
+      if (!/[\p{L}]/u.test(run.value)) return run.value; // punctuation only
+      try {
+        return await call(run.value, settings);
+      } catch {
+        return run.value; // keep the original rather than lose the sentence
+      }
+    })
+  );
+
+  return runs.map((run, i) => run.ws + pieces[i]).join("").trim();
+}
+
+async function translateByTags(runs, settings, rtl) {
+  const markup = buildMarkup(runs, settings.provider === "deepl");
+  return parseMarkup(await call(markup, settings, true), rtl);
+}
+
+async function translateOne(rawText, settings) {
+  const source = normalise(rawText);
+  if (!source) return "";
+
+  const rtl = isRtl(settings.targetLang);
+  const mode = !settings.protectMath
+    ? "plain"
+    : TAG_PROVIDERS.has(settings.provider)
+      ? "tags"
+      : "runs";
+
+  const key = cacheKey(settings.provider, settings.sourceLang, settings.targetLang, `${mode}|${source}`);
+  const hit = await cacheGet(key);
+  if (hit !== undefined) return hit;
+
+  const runs = mode === "plain" ? [] : splitRuns(source);
+  const hasMath = runs.some((r) => r.type === "math");
+
+  let out;
+  if (!hasMath) {
+    // No formula to protect: the engine sees the whole paragraph, best quality.
+    out = await call(source, settings);
+  } else if (mode === "tags") {
+    out = await translateByTags(runs, settings, rtl);
+  } else {
+    out = await translateByRuns(runs, settings, rtl);
+  }
+
+  cacheSet(key, out);
+  return out;
+}
+
 /**
- * Translate a list of strings. Returns an array of the same length; a failed
- * item comes back as { error } so the UI can show it per paragraph instead of
- * failing the whole page.
+ * Translate a list of strings. Always returns an array of the same length; a
+ * failure comes back as { error } so the reader can show it per paragraph
+ * instead of failing the whole page.
  */
 export async function translateMany(items) {
   const settings = await getSettings();
@@ -258,7 +353,7 @@ export async function translateMany(items) {
       try {
         return { text: await translateOne(text, settings) };
       } catch (error) {
-        return { error: String((error && error.message) || error) };
+        return { error: String(error?.message || error) };
       }
     })
   );
