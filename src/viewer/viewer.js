@@ -13,8 +13,11 @@
 
 import { joinLines, normalise, isTranslatable } from "../lib/segment.js";
 import { LANGUAGES, isRtl, DEFAULTS } from "../lib/settings.js";
+import { speak, stop as stopSpeech, isSpeaking } from "../lib/tts.js";
 
 const $ = (id) => document.getElementById(id);
+const THEMES = ["light", "sepia", "dark"];
+const RECENT_KEY = "recent";
 
 // sendMessage reports failures through lastError instead of rejecting; read it
 // or the caller silently receives undefined.
@@ -36,12 +39,15 @@ const state = {
   visible: new Set(),
   current: 0,
   inFlight: 0,
+  title: "",
 };
 
 let pdfjsLib = null;
 let pdfViewer = null;
+let pdfDocument = null;
 let eventBus = null;
 let linkService = null;
+let findController = null;
 let viewerReady = null;
 
 function setStatus(message, kind) {
@@ -104,10 +110,22 @@ async function ensureViewer() {
 
     eventBus = new web.EventBus();
     linkService = new web.PDFLinkService({ eventBus });
+
+    // The find controller must exist before the viewer, which takes it as an
+    // option; it cannot be attached afterwards.
+    if (web.PDFFindController) {
+      findController = new web.PDFFindController({
+        linkService,
+        eventBus,
+        updateMatchesCountOnProgress: true,
+      });
+    }
+
     pdfViewer = new web.PDFViewer({
       container: $("viewerContainer"),
       eventBus,
       linkService,
+      findController,
       textLayerMode: 1,
     });
     linkService.setViewer(pdfViewer);
@@ -145,9 +163,27 @@ function wireViewerEvents() {
     state.pages.set(pageNumber, { paragraphs, status: "idle" });
     layer.addEventListener("click", (event) => onPageClick(event, pageNumber));
 
-    if (state.visible.has(pageNumber) || nearVisible(pageNumber)) schedule(pageNumber);
+    if (state.settings.autoTranslate !== false && (state.visible.has(pageNumber) || nearVisible(pageNumber))) {
+      schedule(pageNumber);
+    }
     if (pageNumber === state.current) renderPane(pageNumber);
   });
+
+  eventBus.on("updatefindmatchescount", ({ matchesCount }) => showMatches(matchesCount));
+  eventBus.on("updatefindcontrolstate", ({ state: found, matchesCount }) => {
+    if (found === 1) $("findCount").textContent = "not found";
+    else showMatches(matchesCount);
+  });
+}
+
+function showMatches(matchesCount) {
+  const el = $("findCount");
+  if (!el) return;
+  if (!matchesCount || !matchesCount.total) {
+    el.textContent = "";
+    return;
+  }
+  el.textContent = `${matchesCount.current} of ${matchesCount.total}`;
 }
 
 async function loadDocument(source, title) {
@@ -155,19 +191,22 @@ async function loadDocument(source, title) {
   await ensureViewer();
 
   const doc = await pdfjsLib.getDocument(source).promise;
+  pdfDocument = doc;
   state.pages.clear();
   state.visible.clear();
   state.current = 1;
+  state.title = title || "document.pdf";
 
   pdfViewer.setDocument(doc);
   linkService.setDocument(doc, null);
+  findController?.setDocument(doc);
 
   document.body.classList.add("has-doc");
-  const label = title || "document.pdf";
   const docTitle = $("docTitle");
-  if (docTitle) docTitle.textContent = label;
-  document.title = `${label} - DZ Math Translate`;
+  if (docTitle) docTitle.textContent = state.title;
+  document.title = `${state.title} - DZ Math Translate`;
   setStatus();
+  buildOutline();
 }
 
 async function openFile(file) {
@@ -185,7 +224,69 @@ async function openFile(file) {
   }
 }
 
+// ---------- table of contents ----------
+
+async function buildOutline() {
+  const body = $("outlineBody");
+  if (!body || !pdfDocument) return;
+
+  let items = null;
+  try {
+    items = await pdfDocument.getOutline();
+  } catch {
+    items = null;
+  }
+
+  body.textContent = "";
+  if (!items || !items.length) {
+    body.innerHTML = '<p class="pane-note">This PDF has no table of contents.</p>';
+    return;
+  }
+
+  const walk = (list, depth) => {
+    for (const item of list) {
+      const link = document.createElement("a");
+      link.href = "#";
+      link.textContent = item.title || "(untitled)";
+      link.className = `depth${Math.min(depth, 2)}`;
+      link.addEventListener("click", (event) => {
+        event.preventDefault();
+        try {
+          linkService.goToDestination(item.dest);
+        } catch (error) {
+          console.warn("[dzmt] outline destination failed", error);
+        }
+      });
+      body.append(link);
+      if (item.items?.length) walk(item.items, depth + 1);
+    }
+  };
+  walk(items, 0);
+}
+
 // ---------- paragraph reconstruction ----------
+
+// Running heads, folios and figure labels are noise: translating them wastes
+// requests and clutters the pane.
+const NOISE = [
+  /^\d{1,4}$/,
+  /^page\s+\d+$/i,
+  /^chapter\s+\d+$/i,
+  /^[ivxlcdm]{1,7}$/i,
+  /^\d+\s*[|/]\s*\d+$/,
+];
+
+function isNoise(text, rect, pageHeight, lineCount) {
+  const clean = text.trim();
+  if (clean.length < (state.settings.minChars || 3)) return true;
+  if (NOISE.some((re) => re.test(clean))) return true;
+  if (state.settings.skipHeaders === false) return false;
+
+  // A single short line hugging the top or bottom edge is a header or a folio.
+  const edge = pageHeight * 0.06;
+  const atEdge = rect.top < edge || rect.bottom > pageHeight - edge;
+  return lineCount === 1 && atEdge && clean.length < 70;
+}
 
 // PDF text layers are a soup of absolutely positioned spans. Rebuild lines by
 // vertical position, then paragraphs by line spacing and indentation.
@@ -194,6 +295,8 @@ function extractParagraphs(layer, pageNumber) {
     (s) => s.textContent && s.textContent.trim()
   );
   if (!spans.length) return [];
+
+  const pageHeight = layer.clientHeight || 1000;
 
   const boxes = spans.map((el) => ({
     el,
@@ -269,19 +372,20 @@ function extractParagraphs(layer, pageNumber) {
       const text = normalise(
         joinLines(g.lines, { dehyphenate: state.settings?.dehyphenate !== false })
       );
+      const rect = {
+        top: Math.min(...g.boxes.map((b) => b.top)),
+        left: Math.min(...g.boxes.map((b) => b.left)),
+        right: Math.max(...g.boxes.map((b) => b.right)),
+        bottom: Math.max(...g.boxes.map((b) => b.bottom)),
+      };
       return {
         id: `p${pageNumber}-${index}`,
         pageNumber,
         text,
-        rect: {
-          top: Math.min(...g.boxes.map((b) => b.top)),
-          left: Math.min(...g.boxes.map((b) => b.left)),
-          right: Math.max(...g.boxes.map((b) => b.right)),
-          bottom: Math.max(...g.boxes.map((b) => b.bottom)),
-        },
+        rect,
         translation: null,
         error: null,
-        skip: !isTranslatable(text),
+        skip: !isTranslatable(text) || isNoise(text, rect, pageHeight, g.lines.length),
       };
     })
     .filter((p) => p.text.length > 1);
@@ -308,6 +412,8 @@ function observePages() {
         state.current = first;
         renderPane(first);
       }
+
+      if (state.settings.autoTranslate === false) return;
 
       const ahead = state.settings?.prefetchPages ?? 2;
       for (const page of visible) {
@@ -357,7 +463,40 @@ async function schedule(pageNumber) {
   if (pageNumber === state.current) renderPane(pageNumber);
 }
 
+// Manual mode: retry failures too, since the reader asked explicitly.
+function translateNow(pageNumber) {
+  const page = state.pages.get(pageNumber);
+  if (!page) {
+    setStatus("This page is not rendered yet", "error");
+    return;
+  }
+  page.status = "idle";
+  for (const paragraph of page.paragraphs) paragraph.error = null;
+  schedule(pageNumber);
+}
+
 // ---------- reading pane ----------
+
+function speakOptions() {
+  return {
+    lang: state.settings.targetLang,
+    voice: state.settings.ttsVoice,
+    rate: state.settings.ttsRate,
+    pitch: state.settings.ttsPitch,
+  };
+}
+
+function iconButton(label, title, handler) {
+  const button = document.createElement("button");
+  button.type = "button";
+  button.textContent = label;
+  button.title = title;
+  button.addEventListener("click", (event) => {
+    event.stopPropagation(); // do not also scroll the page behind the card
+    handler();
+  });
+  return button;
+}
 
 function renderPane(pageNumber) {
   const body = $("paneBody");
@@ -405,7 +544,23 @@ function renderPane(pageNumber) {
     original.className = "orig";
     original.textContent = paragraph.text;
 
-    card.append(translation, original);
+    const tools = document.createElement("div");
+    tools.className = "tools";
+    tools.append(
+      iconButton("\u266B", "Read this paragraph aloud", () => {
+        if (paragraph.translation) speak(paragraph.translation, speakOptions());
+      }),
+      iconButton("\u29C9", "Copy translation and original", () => {
+        const text = `${paragraph.translation || ""}\n\n${paragraph.text}`;
+        navigator.clipboard.writeText(text).then(
+          () => setStatus("Copied"),
+          () => setStatus("Copy failed", "error")
+        );
+        setTimeout(() => setStatus(), 1200);
+      })
+    );
+
+    card.append(tools, translation, original);
     card.addEventListener("mouseenter", () => highlight(paragraph));
     card.addEventListener("mouseleave", clearHighlight);
     card.addEventListener("click", () => scrollToParagraph(paragraph));
@@ -472,19 +627,142 @@ function onPageClick(event, pageNumber) {
   }
 }
 
+// ---------- export ----------
+
+function exportMarkdown() {
+  const pages = [...state.pages.keys()].sort((a, b) => a - b);
+  const lines = [`# ${state.title || "Document"}`, ""];
+  let written = 0;
+
+  for (const pageNumber of pages) {
+    const done = state.pages
+      .get(pageNumber)
+      .paragraphs.filter((p) => !p.skip && p.translation);
+    if (!done.length) continue;
+
+    lines.push(`## Page ${pageNumber}`, "");
+    for (const paragraph of done) {
+      lines.push(paragraph.translation, "", `> ${paragraph.text.replace(/\n/g, " ")}`, "");
+      written++;
+    }
+  }
+
+  if (!written) {
+    setStatus("Nothing translated yet", "error");
+    return;
+  }
+
+  const name = `${(state.title || "document").replace(/\.pdf$/i, "")}-bilingual.md`;
+  const url = URL.createObjectURL(
+    new Blob([lines.join("\n")], { type: "text/markdown;charset=utf-8" })
+  );
+  const link = document.createElement("a");
+  link.href = url;
+  link.download = name;
+  link.click();
+  setTimeout(() => URL.revokeObjectURL(url), 2000);
+  setStatus(`Exported ${written} paragraphs`);
+  setTimeout(() => setStatus(), 2000);
+}
+
+// ---------- recent documents ----------
+
+// Only documents opened by URL can be reopened: a file picked from disk gives
+// no path the browser is allowed to reuse.
+async function rememberRecent(url, title) {
+  const got = await chrome.storage.local.get(RECENT_KEY);
+  const list = (got[RECENT_KEY] || []).filter((item) => item.url !== url);
+  list.unshift({ url, title, at: Date.now() });
+  await chrome.storage.local.set({ [RECENT_KEY]: list.slice(0, 8) });
+}
+
+async function renderRecent() {
+  const host = $("recent");
+  if (!host) return;
+  const got = await chrome.storage.local.get(RECENT_KEY);
+  const list = got[RECENT_KEY] || [];
+  host.textContent = "";
+  if (!list.length) return;
+
+  const heading = document.createElement("h2");
+  heading.textContent = "Recent";
+  host.append(heading);
+
+  for (const item of list) {
+    const link = document.createElement("a");
+    link.href = "#";
+    link.textContent = item.title || item.url;
+    link.title = item.url;
+    link.addEventListener("click", (event) => {
+      event.preventDefault();
+      loadDocument({ url: item.url }, item.title).catch((error) =>
+        setStatus(String(error?.message || error), "error")
+      );
+    });
+    host.append(link);
+  }
+}
+
+// ---------- find ----------
+
+function runFind({ again = false, previous = false } = {}) {
+  if (!findController) {
+    setStatus("Search needs a newer PDF.js", "error");
+    return;
+  }
+  const query = $("findInput").value;
+  if (!query) return;
+
+  const args = {
+    source: window,
+    type: again ? "again" : "",
+    query,
+    caseSensitive: $("findCase").checked,
+    entireWord: false,
+    highlightAll: $("findHighlightAll").checked,
+    findPrevious: previous,
+    matchDiacritics: false,
+  };
+
+  // PDF.js 4 listens on the event bus; older builds exposed executeCommand.
+  if (typeof findController.executeCommand === "function") {
+    findController.executeCommand(again ? "findagain" : "find", args);
+  } else {
+    eventBus.dispatch("find", args);
+  }
+}
+
+function toggleFind(show) {
+  const bar = $("findbar");
+  const open = show ?? bar.hidden;
+  bar.hidden = !open;
+  document.body.classList.toggle("find-open", open);
+  $("toggleFind").classList.toggle("on", open);
+  if (open) $("findInput").focus();
+  else if (findController) eventBus.dispatch("findbarclose", { source: window });
+}
+
 // ---------- toolbar and input ----------
 
 function applySettings(settings) {
   state.settings = { ...DEFAULTS, ...(settings || {}) };
-  document.body.classList.toggle("show-original", !!state.settings.showOriginal);
-  document.body.style.setProperty("--font-scale", state.settings.fontScale || 1);
+  const s = state.settings;
+
+  document.body.dataset.theme = THEMES.includes(s.theme) ? s.theme : "light";
+  document.body.classList.toggle("show-original", !!s.showOriginal);
+  document.body.classList.toggle("pane-start", s.paneSide === "start");
+  document.body.style.setProperty("--font-scale", s.fontScale || 1);
+  document.body.style.setProperty("--line-height", s.lineHeight || 1.75);
+  document.body.style.setProperty("--pane-width", `${s.paneWidth || 400}px`);
 
   const body = $("paneBody");
-  if (body) body.dir = isRtl(state.settings.targetLang) ? "rtl" : "ltr";
+  if (body) body.dir = isRtl(s.targetLang) ? "rtl" : "ltr";
   const original = $("showOriginal");
-  if (original) original.checked = !!state.settings.showOriginal;
+  if (original) original.checked = !!s.showOriginal;
   const lang = $("lang");
-  if (lang) lang.value = state.settings.targetLang;
+  if (lang) lang.value = s.targetLang;
+  const translateButton = $("translatePage");
+  if (translateButton) translateButton.classList.toggle("on", s.autoTranslate === false);
 }
 
 function resetTranslations() {
@@ -495,7 +773,9 @@ function resetTranslations() {
       paragraph.error = null;
     }
   }
-  for (const pageNumber of state.visible) schedule(pageNumber);
+  if (state.settings.autoTranslate !== false) {
+    for (const pageNumber of state.visible) schedule(pageNumber);
+  }
   renderPane(state.current || 1);
 }
 
@@ -520,6 +800,23 @@ function on(id, event, handler) {
       console.error(error);
     }
   });
+}
+
+function speakCurrentPage() {
+  if (isSpeaking()) {
+    stopSpeech();
+    return;
+  }
+  const page = state.pages.get(state.current);
+  const text = (page?.paragraphs || [])
+    .filter((p) => !p.skip && p.translation)
+    .map((p) => p.translation)
+    .join(" ");
+  if (!text) {
+    setStatus("Nothing translated on this page yet", "error");
+    return;
+  }
+  speak(text, speakOptions());
 }
 
 function wireToolbar() {
@@ -548,6 +845,23 @@ function wireToolbar() {
   });
 
   on("togglePane", "click", () => document.body.classList.toggle("no-pane"));
+  on("toggleOutline", "click", () => {
+    const panel = $("outline");
+    panel.hidden = !panel.hidden;
+    $("toggleOutline").classList.toggle("on", !panel.hidden);
+  });
+
+  on("themeBtn", "click", async () => {
+    const next = THEMES[(THEMES.indexOf(state.settings.theme) + 1) % THEMES.length];
+    state.settings.theme = next;
+    document.body.dataset.theme = next;
+    await send({ type: "setSettings", patch: { theme: next } });
+  });
+
+  on("optionsBtn", "click", () => send({ type: "openOptions" }));
+  on("translatePage", "click", () => translateNow(state.current || 1));
+  on("speakPage", "click", speakCurrentPage);
+  on("exportBtn", "click", exportMarkdown);
 
   // Navigation is meaningless before a document is loaded; guard rather than throw.
   on("prev", "click", () => pdfViewer?.previousPage());
@@ -562,6 +876,18 @@ function wireToolbar() {
     if (!pdfViewer) return;
     const n = Number(event.target.value);
     if (n >= 1 && n <= pdfViewer.pagesCount) pdfViewer.currentPageNumber = n;
+  });
+
+  on("toggleFind", "click", () => toggleFind());
+  on("findClose", "click", () => toggleFind(false));
+  on("findNext", "click", () => runFind({ again: true }));
+  on("findPrev", "click", () => runFind({ again: true, previous: true }));
+  on("findCase", "change", () => runFind());
+  on("findHighlightAll", "change", () => runFind());
+  on("findInput", "input", () => runFind());
+  on("findInput", "keydown", (event) => {
+    if (event.key === "Enter") runFind({ again: true, previous: event.shiftKey });
+    if (event.key === "Escape") toggleFind(false);
   });
 
   on("open", "click", () => $("file")?.click());
@@ -592,10 +918,28 @@ function wireToolbar() {
   });
 
   document.addEventListener("keydown", (event) => {
-    if (event.key === "o" && (event.ctrlKey || event.metaKey)) {
+    const typing = /^(INPUT|TEXTAREA|SELECT)$/.test(event.target?.tagName || "");
+
+    if ((event.ctrlKey || event.metaKey) && event.key === "o") {
       event.preventDefault();
       $("file")?.click();
+      return;
     }
+    if ((event.ctrlKey || event.metaKey) && event.key === "f") {
+      event.preventDefault(); // keep search inside the document, not the browser
+      toggleFind(true);
+      return;
+    }
+    if (typing || event.ctrlKey || event.metaKey || event.altKey) return;
+
+    if (event.key === "j") pdfViewer?.nextPage();
+    else if (event.key === "k") pdfViewer?.previousPage();
+    else if (event.key === "t") document.body.classList.toggle("no-pane");
+    else if (event.key === "s") speakCurrentPage();
+    else if (event.key === "/") {
+      event.preventDefault();
+      toggleFind(true);
+    } else if (event.key === "Escape") stopSpeech();
   });
 }
 
@@ -605,16 +949,19 @@ function wireToolbar() {
 
   const res = await send({ type: "getSettings" });
   applySettings(res.ok ? res.data : null);
-  if (!res.ok) {
-    setStatus(`Settings unavailable: ${res.error}`, "error");
-  }
+  if (!res.ok) setStatus(`Settings unavailable: ${res.error}`, "error");
 
   const file = new URLSearchParams(location.search).get("file");
-  if (!file) return;
+  if (!file) {
+    await renderRecent();
+    return;
+  }
 
   try {
     const url = decodeURIComponent(file);
-    await loadDocument({ url }, url.split("/").pop());
+    const title = url.split("/").pop();
+    await loadDocument({ url }, title);
+    await rememberRecent(url, title);
   } catch (error) {
     setStatus(`Could not open this PDF: ${String(error?.message || error)}`, "error");
     console.error(error);
