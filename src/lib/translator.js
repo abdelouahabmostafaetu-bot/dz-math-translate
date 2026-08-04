@@ -45,7 +45,7 @@ function cacheSet(key, value) {
       flushTimer = null;
       try {
         await chrome.storage.local.set(batch);
-      } catch (e) {
+      } catch (error) {
         // Quota exceeded: drop the persistent cache, keep working in memory.
         await clearCache();
       }
@@ -77,15 +77,15 @@ class Limiter {
     this.queue = [];
   }
   setLimit(n) {
-    this.limit = Math.max(1, Math.min(8, n | 0 || 1));
+    this.limit = Math.max(1, Math.min(8, (n | 0) || 1));
   }
   run(task) {
     return new Promise((resolve, reject) => {
       this.queue.push({ task, resolve, reject });
-      this.#pump();
+      this.pump();
     });
   }
-  #pump() {
+  pump() {
     while (this.active < this.limit && this.queue.length) {
       const { task, resolve, reject } = this.queue.shift();
       this.active++;
@@ -93,7 +93,7 @@ class Limiter {
         .then(resolve, reject)
         .finally(() => {
           this.active--;
-          this.#pump();
+          this.pump();
         });
     }
   }
@@ -106,10 +106,13 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
 // ---------- providers -------------------------------------------------------
 
+const GOOGLE_FREE_URL = "https://translate.googleapis.com/translate_a/single";
+const GOOGLE_CLOUD_URL = "https://translation.googleapis.com/language/translate/v2";
+
 // Unofficial endpoint used by the Google Translate web page. No key, no cost,
 // but rate limited and not covered by any API contract: see README.
 async function googleFree({ text, sl, tl }) {
-  const url = new URL("https://translate.googleapis.com/translate_a/single");
+  const url = new URL(GOOGLE_FREE_URL);
   url.searchParams.set("client", "gtx");
   url.searchParams.set("sl", sl || "auto");
   url.searchParams.set("tl", tl);
@@ -122,14 +125,17 @@ async function googleFree({ text, sl, tl }) {
   if (!res.ok) throw new Error(`google-free ${res.status}`);
 
   const data = await res.json();
-  const sentences = data?.sentences || [];
+  const sentences = data && data.sentences ? data.sentences : [];
   return sentences.map((s) => s.trans || "").join("");
 }
 
 async function googleCloud({ text, sl, tl, settings }) {
   const key = settings.googleApiKey;
   if (!key) throw new Error("Google Cloud API key missing");
-  const url = `https://translation.googleapis.com/language/translate/v2?key=${encodeURIComponent(key)}`;
+
+  const url = new URL(GOOGLE_CLOUD_URL);
+  url.searchParams.set("key", key);
+
   const body = { q: text, target: tl, format: "text" };
   if (sl && sl !== "auto") body.source = sl;
 
@@ -140,6 +146,7 @@ async function googleCloud({ text, sl, tl, settings }) {
   });
   if (res.status === 429) throw new RateLimited("429");
   if (!res.ok) throw new Error(`google-cloud ${res.status}`);
+
   const data = await res.json();
   return data?.data?.translations?.[0]?.translatedText || "";
 }
@@ -147,11 +154,14 @@ async function googleCloud({ text, sl, tl, settings }) {
 async function deepl({ text, sl, tl, settings }) {
   const key = settings.deeplApiKey;
   if (!key) throw new Error("DeepL API key missing");
+
   const host = settings.deeplFree ? "api-free.deepl.com" : "api.deepl.com";
+  const endpoint = "https://" + host + "/v2/translate";
+
   const params = new URLSearchParams({ text, target_lang: tl.toUpperCase() });
   if (sl && sl !== "auto") params.set("source_lang", sl.toUpperCase());
 
-  const res = await fetch(`https://${host}/v2/translate`, {
+  const res = await fetch(endpoint, {
     method: "POST",
     headers: {
       Authorization: `DeepL-Auth-Key ${key}`,
@@ -161,6 +171,7 @@ async function deepl({ text, sl, tl, settings }) {
   });
   if (res.status === 429 || res.status === 456) throw new RateLimited("429");
   if (!res.ok) throw new Error(`deepl ${res.status}`);
+
   const data = await res.json();
   return data?.translations?.[0]?.text || "";
 }
@@ -179,6 +190,7 @@ async function libre({ text, sl, tl, settings }) {
   });
   if (res.status === 429) throw new RateLimited("429");
   if (!res.ok) throw new Error(`libre ${res.status}`);
+
   const data = await res.json();
   return data?.translatedText || "";
 }
@@ -246,7 +258,7 @@ export async function translateMany(items) {
       try {
         return { text: await translateOne(text, settings) };
       } catch (error) {
-        return { error: String(error?.message || error) };
+        return { error: String((error && error.message) || error) };
       }
     })
   );
