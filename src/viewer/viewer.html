@@ -1,0 +1,61 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>DZ Math Translate - Bilingual reader</title>
+    <link rel="stylesheet" href="../../vendor/pdfjs/web/pdf_viewer.css" />
+    <link rel="stylesheet" href="viewer.css" />
+  </head>
+  <body>
+    <header id="toolbar">
+      <div class="group">
+        <button id="open" title="Open a local PDF">Open PDF</button>
+        <span id="docTitle" class="title">No document</span>
+      </div>
+
+      <div class="group">
+        <button id="prev" title="Previous page">&#8249;</button>
+        <input id="pageNo" type="number" min="1" value="1" />
+        <span id="pageCount">/ 0</span>
+        <button id="next" title="Next page">&#8250;</button>
+        <button id="zoomOut" title="Zoom out">-</button>
+        <button id="zoomIn" title="Zoom in">+</button>
+      </div>
+
+      <div class="group">
+        <select id="lang" title="Target language"></select>
+        <label class="check"><input id="showOriginal" type="checkbox" /> Original</label>
+        <button id="togglePane" title="Show or hide the translation pane">Pane</button>
+        <span id="status" class="status"></span>
+      </div>
+    </header>
+
+    <main id="main">
+      <div id="viewerContainer">
+        <div id="viewer" class="pdfViewer"></div>
+        <div id="dropzone">
+          <div class="dz-inner">
+            <h1>Bilingual reader</h1>
+            <p>Drop a PDF here, or use <b>Open PDF</b>.</p>
+            <p class="hint">
+              Each page is translated paragraph by paragraph as you scroll.
+              Formulas are never sent to the translator.
+            </p>
+          </div>
+        </div>
+      </div>
+
+      <aside id="pane">
+        <div id="paneHead">
+          <span id="paneTitle">Translation</span>
+          <span id="paneMeta"></span>
+        </div>
+        <div id="paneBody"></div>
+      </aside>
+    </main>
+
+    <input id="file" type="file" accept="application/pdf,.pdf" hidden />
+    <script type="module" src="viewer.js"></script>
+  </body>
+</html>

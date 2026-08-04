@@ -1,0 +1,48 @@
+.dzmt-tr {
+  margin: 6px 0 10px;
+  padding: 8px 12px;
+  border-inline-start: 3px solid #1f4e79;
+  background: rgba(31, 78, 121, 0.06);
+  border-radius: 6px;
+  color: inherit;
+  font-size: 1em;
+  line-height: 1.8;
+  white-space: pre-wrap;
+}
+
+html[data-dzmt-dir="rtl"] .dzmt-tr {
+  direction: rtl;
+  text-align: start;
+  font-size: 1.05em;
+}
+
+.dzmt-tr.dzmt-failed {
+  border-inline-start-color: #a3242f;
+  background: rgba(163, 36, 47, 0.07);
+  font-style: italic;
+}
+
+.dzmt-bubble {
+  position: absolute;
+  z-index: 2147483647;
+  max-width: 420px;
+  padding: 10px 30px 10px 12px;
+  background: #fff;
+  color: #1b1b1f;
+  border: 1px solid #d8d5cc;
+  border-radius: 8px;
+  box-shadow: 0 6px 24px rgba(0, 0, 0, 0.18);
+  font: 14px/1.7 system-ui, sans-serif;
+  white-space: pre-wrap;
+}
+
+.dzmt-close {
+  position: absolute;
+  top: 4px;
+  right: 6px;
+  border: 0;
+  background: transparent;
+  color: #5a5f6b;
+  cursor: pointer;
+  font-size: 13px;
+}

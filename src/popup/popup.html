@@ -1,0 +1,69 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <link rel="stylesheet" href="popup.css" />
+  </head>
+  <body>
+    <h1>DZ Math Translate</h1>
+
+    <div class="row">
+      <button id="translatePage" class="primary">Translate this page</button>
+      <button id="openReader">PDF reader</button>
+    </div>
+
+    <label class="field">
+      <span>Target language</span>
+      <select id="targetLang"></select>
+    </label>
+
+    <label class="field">
+      <span>Engine</span>
+      <select id="provider">
+        <option value="google-free">Google (free, no key)</option>
+        <option value="google-cloud">Google Cloud (API key)</option>
+        <option value="deepl">DeepL (API key)</option>
+        <option value="libre">LibreTranslate (self-hosted)</option>
+      </select>
+    </label>
+
+    <label class="field hidden" data-for="google-cloud">
+      <span>Google Cloud key</span>
+      <input id="googleApiKey" type="password" placeholder="AIza..." />
+    </label>
+
+    <label class="field hidden" data-for="deepl">
+      <span>DeepL key</span>
+      <input id="deeplApiKey" type="password" placeholder="xxxx:fx" />
+    </label>
+
+    <label class="field hidden" data-for="libre">
+      <span>LibreTranslate endpoint</span>
+      <input id="libreEndpoint" type="url" placeholder="http://localhost:5000/translate" />
+    </label>
+
+    <label class="check"><input id="protectMath" type="checkbox" /> Never translate formulas</label>
+    <label class="check"><input id="dehyphenate" type="checkbox" /> Repair words split across lines</label>
+    <label class="check"><input id="showOriginal" type="checkbox" /> Show original text too</label>
+    <label class="check"><input id="pdfTakeover" type="checkbox" /> Open online PDFs in the reader</label>
+
+    <label class="field">
+      <span>Pages translated ahead <b id="prefetchValue"></b></span>
+      <input id="prefetchPages" type="range" min="0" max="5" step="1" />
+    </label>
+
+    <label class="field">
+      <span>Parallel requests <b id="concurrencyValue"></b></span>
+      <input id="concurrency" type="range" min="1" max="8" step="1" />
+    </label>
+
+    <div class="footer">
+      <span id="cacheInfo">cache: ...</span>
+      <button id="clearCache" class="link">clear</button>
+    </div>
+
+    <p class="hint">Alt+T translates a page. Alt+P opens the PDF reader.</p>
+
+    <script type="module" src="popup.js"></script>
+  </body>
+</html>
