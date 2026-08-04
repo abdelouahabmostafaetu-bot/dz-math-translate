@@ -45,6 +45,11 @@ chrome.runtime.onInstalled.addListener(async () => {
       title: "Open bilingual PDF reader",
       contexts: ["action"],
     });
+    chrome.contextMenus.create({
+      id: "open-options",
+      title: "Settings and glossary",
+      contexts: ["action"],
+    });
   });
 });
 
@@ -59,6 +64,7 @@ function openReader(file) {
 
 chrome.contextMenus.onClicked.addListener(async (info, tab) => {
   if (info.menuItemId === "open-reader") return openReader();
+  if (info.menuItemId === "open-options") return chrome.runtime.openOptionsPage();
   if (info.menuItemId === "translate-selection" && info.selectionText && tab?.id) {
     const [result] = await translateMany([info.selectionText]);
     chrome.tabs.sendMessage(tab.id, {
@@ -84,6 +90,7 @@ const HANDLERS = {
   cacheStats: () => cacheStats(),
   clearCache: () => clearCache(),
   openReader: ({ file }) => openReader(file),
+  openOptions: () => chrome.runtime.openOptionsPage(),
   defaults: () => DEFAULTS,
 };
 

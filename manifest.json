@@ -1,10 +1,9 @@
 {
   "manifest_version": 3,
   "name": "DZ Math Translate",
-  "version": "0.1.0",
-  "description": "Bilingual reading for mathematics: translates PDFs and web pages paragraph by paragraph as you scroll, and leaves formulas untouched.",
+  "version": "0.2.0",
+  "description": "Bilingual reader for mathematical PDFs and web pages. Prose is translated, formulas are not.",
   "minimum_chrome_version": "114",
-
   "permissions": [
     "storage",
     "declarativeNetRequest",
@@ -12,19 +11,19 @@
     "scripting",
     "activeTab"
   ],
-
   "host_permissions": ["<all_urls>"],
-
   "background": {
     "service_worker": "src/background.js",
     "type": "module"
   },
-
   "action": {
-    "default_title": "DZ Math Translate",
-    "default_popup": "src/popup/popup.html"
+    "default_popup": "src/popup/popup.html",
+    "default_title": "DZ Math Translate"
   },
-
+  "options_ui": {
+    "page": "src/options/options.html",
+    "open_in_tab": true
+  },
   "content_scripts": [
     {
       "matches": ["http://*/*", "https://*/*"],
@@ -34,18 +33,16 @@
       "all_frames": false
     }
   ],
-
   "web_accessible_resources": [
     {
       "resources": ["src/viewer/*", "vendor/pdfjs/*"],
       "matches": ["<all_urls>"]
     }
   ],
-
   "commands": {
     "toggle-page": {
       "suggested_key": { "default": "Alt+T" },
-      "description": "Translate / restore the current web page"
+      "description": "Translate or restore this page"
     },
     "open-reader": {
       "suggested_key": { "default": "Alt+P" },

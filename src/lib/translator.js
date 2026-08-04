@@ -1,27 +1,18 @@
-// ---------------------------------------------------------------------------
-//  Translation engine: providers, concurrency, retry, cache.
-//
-//  Runs in the service worker only, so the whole browser shares one cache and
-//  one rate limit.
-//
-//  Formulas are protected in one of two ways, never with placeholders:
-//
-//   * runs  - split the paragraph, send only the prose, reassemble. Used for
-//             the free Google endpoint, which has no markup support.
-//   * tags  - send the paragraph as markup with formulas inside tags the API
-//             is documented to ignore (DeepL tag_handling=xml + ignore_tags,
-//             Google format=html with translate="no"). Better grammar, since
-//             the engine still sees the whole sentence.
-// ---------------------------------------------------------------------------
+// Translation engine: providers, concurrency, retry, cache, terminology.
+// Protection is never done with placeholders (engines rewrite them):
+//   runs - send prose only, formulas never leave the browser (google-free)
+//   tags - whole sentence with protected text inside ignored tags (deepl,
+//          google-cloud). Better grammar, documented guarantee.
 
 import { getSettings, isRtl } from "./settings.js";
 import { normalise, splitRuns, isolate } from "./segment.js";
+import { compileGlossary, applyGlossary } from "./glossary.js";
 
 class RateLimited extends Error {}
 
 const TAG_PROVIDERS = new Set(["google-cloud", "deepl"]);
 
-// ---------- cache -----------------------------------------------------------
+// ---------- cache ----------
 
 const memory = new Map();
 const MEMORY_MAX = 4000;
@@ -51,7 +42,6 @@ function cacheSet(key, value) {
   memory.set(key, value);
   pendingWrites[key] = value;
   if (flushTimer) return;
-
   flushTimer = setTimeout(async () => {
     const batch = { ...pendingWrites };
     for (const k of Object.keys(pendingWrites)) delete pendingWrites[k];
@@ -79,7 +69,7 @@ export async function clearCache() {
   return keys.length;
 }
 
-// ---------- concurrency -----------------------------------------------------
+// ---------- concurrency ----------
 
 class Limiter {
   constructor(limit) {
@@ -112,16 +102,13 @@ class Limiter {
 
 const limiter = new Limiter(4);
 let cooldownUntil = 0;
-
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
-// ---------- providers -------------------------------------------------------
+// ---------- providers ----------
 
 const GOOGLE_FREE_URL = "https://translate.googleapis.com/translate_a/single";
 const GOOGLE_CLOUD_URL = "https://translation.googleapis.com/language/translate/v2";
 
-// Unofficial endpoint used by the Google Translate web page: no key, no cost,
-// rate limited, no contract. See the README.
 async function googleFree({ text, sl, tl }) {
   const url = new URL(GOOGLE_FREE_URL);
   url.searchParams.set("client", "gtx");
@@ -134,7 +121,6 @@ async function googleFree({ text, sl, tl }) {
   const res = await fetch(url, { credentials: "omit", cache: "no-store" });
   if (res.status === 429 || res.status === 403) throw new RateLimited("rate limited");
   if (!res.ok) throw new Error(`google-free ${res.status}`);
-
   const data = await res.json();
   return (data?.sentences || []).map((s) => s.trans || "").join("");
 }
@@ -142,10 +128,8 @@ async function googleFree({ text, sl, tl }) {
 async function googleCloud({ text, sl, tl, settings, tagged }) {
   const key = settings.googleApiKey;
   if (!key) throw new Error("Google Cloud API key missing");
-
   const url = new URL(GOOGLE_CLOUD_URL);
   url.searchParams.set("key", key);
-
   const body = { q: text, target: tl, format: tagged ? "html" : "text" };
   if (sl && sl !== "auto") body.source = sl;
 
@@ -156,7 +140,6 @@ async function googleCloud({ text, sl, tl, settings, tagged }) {
   });
   if (res.status === 429) throw new RateLimited("rate limited");
   if (!res.ok) throw new Error(`google-cloud ${res.status}`);
-
   const data = await res.json();
   return data?.data?.translations?.[0]?.translatedText || "";
 }
@@ -164,19 +147,16 @@ async function googleCloud({ text, sl, tl, settings, tagged }) {
 async function deepl({ text, sl, tl, settings, tagged }) {
   const key = settings.deeplApiKey;
   if (!key) throw new Error("DeepL API key missing");
-
   const host = settings.deeplFree ? "api-free.deepl.com" : "api.deepl.com";
-  const endpoint = "https://" + host + "/v2/translate";
 
   const params = new URLSearchParams({ text, target_lang: tl.toUpperCase() });
   if (sl && sl !== "auto") params.set("source_lang", sl.toUpperCase());
   if (tagged) {
-    // Documented DeepL feature: content inside ignored tags is passed through.
-    params.set("tag_handling", "xml");
+    params.set("tag_handling", "xml"); // documented: ignored tags pass through
     params.set("ignore_tags", "x");
   }
 
-  const res = await fetch(endpoint, {
+  const res = await fetch("https://" + host + "/v2/translate", {
     method: "POST",
     headers: {
       Authorization: `DeepL-Auth-Key ${key}`,
@@ -186,7 +166,6 @@ async function deepl({ text, sl, tl, settings, tagged }) {
   });
   if (res.status === 429 || res.status === 456) throw new RateLimited("rate limited");
   if (!res.ok) throw new Error(`deepl ${res.status}`);
-
   const data = await res.json();
   return data?.translations?.[0]?.text || "";
 }
@@ -205,19 +184,12 @@ async function libre({ text, sl, tl, settings }) {
   });
   if (res.status === 429) throw new RateLimited("rate limited");
   if (!res.ok) throw new Error(`libre ${res.status}`);
-
   const data = await res.json();
   return data?.translatedText || "";
 }
 
-const PROVIDERS = {
-  "google-free": googleFree,
-  "google-cloud": googleCloud,
-  deepl,
-  libre,
-};
+const PROVIDERS = { "google-free": googleFree, "google-cloud": googleCloud, deepl, libre };
 
-// One network call, rate limited, retried, with a browser-wide cooldown.
 async function call(text, settings, tagged = false) {
   const fn = PROVIDERS[settings.provider] || googleFree;
   const sl = settings.sourceLang;
@@ -247,49 +219,50 @@ async function call(text, settings, tagged = false) {
   throw lastError || new Error("translation failed");
 }
 
-// ---------- markup helpers --------------------------------------------------
+// ---------- markup ----------
 
 const escapeXml = (s) =>
   String(s).replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
 
-function unescapeXml(s) {
-  return String(s)
+const unescapeXml = (s) =>
+  String(s)
     .replace(/&lt;/g, "<")
     .replace(/&gt;/g, ">")
     .replace(/&quot;/g, '"')
     .replace(/&#39;/g, "'")
     .replace(/&nbsp;/g, " ")
     .replace(/&amp;/g, "&");
-}
 
-function buildMarkup(runs, useX) {
+// Bidi isolation is applied here, before the request: the isolate characters
+// are invisible and travel safely inside an ignored tag.
+function buildMarkup(runs, useX, rtl) {
   return runs
     .map(({ type, value, ws }) => {
-      const body = escapeXml(value);
-      if (type !== "math") return ws + body;
+      if (type === "text") return ws + escapeXml(value);
+      const body = escapeXml(type === "math" ? isolate(value, rtl) : value);
       return ws + (useX ? `<x>${body}</x>` : `<span translate="no">${body}</span>`);
     })
     .join("");
 }
 
-function parseMarkup(raw, rtl) {
+function parseMarkup(raw) {
   let out = String(raw || "");
-  out = out.replace(/<x>([\s\S]*?)<\/x>/g, (_m, inner) => isolate(unescapeXml(inner), rtl));
+  out = out.replace(/<x>([\s\S]*?)<\/x>/g, (_m, inner) => unescapeXml(inner));
   out = out.replace(
     /<span[^>]*translate="?no"?[^>]*>([\s\S]*?)<\/span>/gi,
-    (_m, inner) => isolate(unescapeXml(inner), rtl)
+    (_m, inner) => unescapeXml(inner)
   );
   out = out.replace(/<[^>]+>/g, ""); // any tag the engine invented
-  return unescapeXml(out).replace(/\s+/g, " ").trim();
+  return unescapeXml(out).replace(/[ \t]+/g, " ").trim();
 }
 
-// ---------- strategies ------------------------------------------------------
+// ---------- strategies ----------
 
-// Send prose only; mathematics never leaves the browser.
 async function translateByRuns(runs, settings, rtl) {
   const pieces = await Promise.all(
     runs.map(async (run) => {
       if (run.type === "math") return isolate(run.value, rtl);
+      if (run.type === "term") return run.value; // already in the target language
       if (!/[\p{L}]/u.test(run.value)) return run.value; // punctuation only
       try {
         return await call(run.value, settings);
@@ -298,42 +271,41 @@ async function translateByRuns(runs, settings, rtl) {
       }
     })
   );
-
   return runs.map((run, i) => run.ws + pieces[i]).join("").trim();
 }
 
-async function translateByTags(runs, settings, rtl) {
-  const markup = buildMarkup(runs, settings.provider === "deepl");
-  return parseMarkup(await call(markup, settings, true), rtl);
-}
-
-async function translateOne(rawText, settings) {
+async function translateOne(rawText, settings, glossary) {
   const source = normalise(rawText);
   if (!source) return "";
 
   const rtl = isRtl(settings.targetLang);
-  const mode = !settings.protectMath
-    ? "plain"
-    : TAG_PROVIDERS.has(settings.provider)
-      ? "tags"
-      : "runs";
+  const useTags = TAG_PROVIDERS.has(settings.provider);
 
-  const key = cacheKey(settings.provider, settings.sourceLang, settings.targetLang, `${mode}|${source}`);
+  let runs = settings.protectMath
+    ? splitRuns(source)
+    : [{ type: "text", value: source, ws: "" }];
+  runs = applyGlossary(runs, glossary);
+
+  const protectedRuns = runs.filter((r) => r.type !== "text").length;
+  const mode = protectedRuns === 0 ? "plain" : useTags ? "tags" : "runs";
+  const signature = protectedRuns && glossary ? glossary.signature : "";
+
+  const key = cacheKey(
+    settings.provider,
+    settings.sourceLang,
+    settings.targetLang,
+    `${mode}|${signature}|${source}`
+  );
   const hit = await cacheGet(key);
   if (hit !== undefined) return hit;
 
-  const runs = mode === "plain" ? [] : splitRuns(source);
-  const hasMath = runs.some((r) => r.type === "math");
-
   let out;
-  if (!hasMath) {
-    // No formula to protect: the engine sees the whole paragraph, best quality.
-    out = await call(source, settings);
-  } else if (mode === "tags") {
-    out = await translateByTags(runs, settings, rtl);
-  } else {
-    out = await translateByRuns(runs, settings, rtl);
-  }
+  if (mode === "plain") out = await call(source, settings);
+  else if (mode === "tags")
+    out = parseMarkup(
+      await call(buildMarkup(runs, settings.provider === "deepl", rtl), settings, true)
+    );
+  else out = await translateByRuns(runs, settings, rtl);
 
   cacheSet(key, out);
   return out;
@@ -348,10 +320,13 @@ export async function translateMany(items) {
   const settings = await getSettings();
   limiter.setLimit(settings.concurrency);
 
+  const glossary =
+    settings.glossaryEnabled === false ? null : compileGlossary(settings.glossary);
+
   return Promise.all(
     (items || []).map(async (text) => {
       try {
-        return { text: await translateOne(text, settings) };
+        return { text: await translateOne(text, settings, glossary) };
       } catch (error) {
         return { error: String(error?.message || error) };
       }
